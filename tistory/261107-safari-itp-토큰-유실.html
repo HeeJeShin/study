@@ -1,0 +1,130 @@
+<!-- 티스토리 글쓰기 → 우측 상단 '기본모드' → 'HTML'로 바꾼 뒤 아래 내용을 통째로 붙여넣기 -->
+<!-- 제목: Safari에서만 로그인이 풀린다면: ITP와 토큰 저장 위치 -->
+<!-- 태그: Safari, ITP, 쿠키, localStorage, JWT, 프론트엔드, 트러블슈팅 -->
+
+<p>결제가 있는 관광 플랫폼을 만들 때 일입니다. 서비스 시작 전 QA에서 <strong>iOS Safari에서만 로그인이 풀리고, 그 때문에 결제가 실패</strong>했습니다. Chrome과 안드로이드에서는 아무 문제가 없었습니다. 원인은 Safari의 추적 방지 기능인 <strong>ITP</strong>였습니다. 이 글에서는 그때 어떻게 원인을 찾았는지, 어떻게 막았는지, 그리고 다시 공부하면서 알게 된 <strong>더 나은 방법</strong>까지 정리합니다.</p>
+<hr>
+<h2>1. 원인을 좁혀 간 순서</h2>
+<table>
+<thead>
+<tr>
+<th>단계</th>
+<th>확인한 것</th>
+<th>알게 된 것</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1. 범위</td>
+<td>어떤 환경에서 생기나</td>
+<td>iOS Safari만. Chrome·안드로이드는 정상</td>
+</tr>
+<tr>
+<td>2. 가설</td>
+<td>브라우저마다 다른 게 뭘까</td>
+<td>저장소(쿠키) 정책</td>
+</tr>
+<tr>
+<td>3. 재현</td>
+<td>iOS 실기기에서 같은 증상 반복</td>
+<td>토큰을 쿠키에만 두는 구조가 문제</td>
+</tr>
+<tr>
+<td>4. 원인</td>
+<td>Safari 쿠키 정책</td>
+<td>ITP가 스크립트로 만든 쿠키 수명을 줄임</td>
+</tr>
+</tbody></table>
+<p>&quot;한 브라우저에서만 생긴다&quot;는 사실이 가장 큰 단서였습니다. 코드 문제였다면 다른 브라우저에서도 생겼을 테니까요.</p>
+<hr>
+<h2>2. ITP는 무엇을 막나</h2>
+<p>ITP(Intelligent Tracking Prevention)는 광고 추적을 막으려고 Safari가 쿠키와 저장소를 제한하는 기능입니다. 헷갈리기 쉬운 점은 <strong>쿠키를 누가 만들었는지에 따라 규칙이 다르다</strong>는 것입니다.</p>
+<table>
+<thead>
+<tr>
+<th>대상</th>
+<th>Safari의 처리</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>서드파티 쿠키 (페이지 안 다른 사이트의 쿠키)</td>
+<td>아예 막음</td>
+</tr>
+<tr>
+<td>스크립트로 만든 쿠키 (<code>document.cookie</code>, <code>js-cookie</code>)</td>
+<td>만료일을 길게 줘도 <strong>최대 7일</strong></td>
+</tr>
+<tr>
+<td>서버가 <code>Set-Cookie</code>로 내려준 쿠키</td>
+<td>7일 제한 없음 (서버가 사이트와 다른 곳에 있으면 예외)</td>
+</tr>
+<tr>
+<td>localStorage 같은 스크립트 저장소</td>
+<td>그 사이트에 <strong>7일간 안 들어오면</strong> 지움 (홈 화면 웹앱은 예외)</td>
+</tr>
+</tbody></table>
+<p>저희는 로그인 응답으로 받은 토큰을 프론트에서 <code>Cookies.set()</code>으로 저장하고 있었습니다. 바로 두 번째 줄에 해당하는 경우였습니다.</p>
+<blockquote>
+<p>처음에는 &quot;ITP가 서드파티 쿠키를 지운다&quot;거나 &quot;localStorage는 ITP와 상관없다&quot;고 알고 있었는데, 둘 다 정확하지 않았습니다.</p>
+</blockquote>
+<hr>
+<h2>3. 그때 적용한 방법: 함께 저장하고 순서대로 복구</h2>
+<p>토큰을 한 곳에만 두지 않고 세 곳에 나눠 두었습니다.</p>
+<pre><code>저장할 때
+  setTokens(access, refresh)
+    ├─ 메모리          (지금 페이지에서 바로 씀)
+    ├─ 쿠키            (서버 요청에 자동으로 실림)
+    └─ localStorage    (쿠키가 지워져도 다시 살리는 용도)
+
+새로고침할 때
+  메모리 → 없으면 쿠키 → 없으면 localStorage(메모리·쿠키에 다시 채움) → 없으면 로그아웃
+</code></pre>
+<pre><code class="language-js">const setTokens = (access, refresh) =&gt; {
+  memory.accessToken = access;
+  Cookies.set(&#39;accessToken&#39;, access);
+  localStorage.setItem(&#39;accessToken&#39;, access); // 쿠키가 지워졌을 때를 대비
+};
+</code></pre>
+<p>localStorage는 XSS(악성 스크립트 삽입) 공격에 토큰이 노출될 수 있습니다. 그래서 액세스 토큰 만료를 1시간으로 짧게 두고, 만료되면 리프레시 토큰으로 다시 받게 해서 피해 범위를 줄였습니다. &quot;로그인이 계속 풀리는 문제&quot;와 &quot;XSS 위험&quot;을 저울질한 선택이었습니다.</p>
+<p>같은 시기에 Safari에서 본인인증 팝업이 막히는 문제도 있어 리다이렉트 방식으로 바꿨고, 막히던 인증·결제 요청은 미들웨어와 CORS 헤더를 고쳐 풀었습니다. 서비스 시작 전에 해결했고, 이후 <strong>Safari 실기기 확인을 배포 전 점검 항목</strong>에 넣었습니다.</p>
+<hr>
+<h2>4. 다시 공부하며 알게 된 한계</h2>
+<p>이 방법이 통한 건 localStorage의 7일이 <strong>마지막 방문부터</strong> 세기 때문입니다. 자주 오는 사용자는 localStorage가 계속 남아 있습니다. 하지만 7일 넘게 안 들어온 사용자는 쿠키도, localStorage도 지워져 다시 로그인해야 합니다. 그리고 XSS 위험은 줄였을 뿐 없어지지 않았습니다.</p>
+<hr>
+<h2>5. 지금 다시 한다면</h2>
+<pre><code>리프레시 토큰 → 서버가 Set-Cookie: HttpOnly; Secure; SameSite=Lax 로 내려줌
+액세스 토큰   → 메모리에만 둠, 새로고침하면 리프레시 쿠키로 다시 받음
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>그때 방식</th>
+<th>서버 HttpOnly 쿠키</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ITP 7일 제한</td>
+<td>쿠키는 받음, localStorage로 버팀</td>
+<td>받지 않음</td>
+</tr>
+<tr>
+<td>XSS로 토큰 탈취</td>
+<td>가능 (짧은 만료로 줄임)</td>
+<td>리프레시 토큰은 스크립트로 못 읽음</td>
+</tr>
+<tr>
+<td>필요한 것</td>
+<td>프론트만 고치면 됨</td>
+<td>백엔드가 쿠키를 내려줘야 함, API가 같은 도메인 아래 있어야 함, CSRF 대비</td>
+</tr>
+</tbody></table>
+<p>그때는 프론트에서 바로 고칠 수 있는 방법을 골랐습니다. 다음에는 처음 인증 구조를 정할 때부터 백엔드와 함께 정하겠습니다.</p>
+<hr>
+<h2>정리</h2>
+<ul>
+<li>Safari에서만 로그인이 풀리면 <strong>ITP</strong>부터 의심한다.</li>
+<li>ITP는 <strong>스크립트로 만든 쿠키</strong>를 최대 7일로 줄인다. 서버가 내려준 쿠키는 다르다.</li>
+<li>localStorage도 <strong>7일간 방문이 없으면</strong> 지워진다. 완전한 해결이 아니다.</li>
+<li>가장 깔끔한 답은 <strong>리프레시 토큰은 서버의 HttpOnly 쿠키, 액세스 토큰은 메모리</strong>.</li>
+</ul>
+
